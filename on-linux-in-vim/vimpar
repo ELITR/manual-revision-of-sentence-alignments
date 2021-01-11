@@ -1,0 +1,159 @@
+#!/usr/bin/env perl
+# given N files as args, it will:
+# (1) preprocess them, i.e. pad all lines to ensure equal line lengths across
+#     files
+# (2) launch vim and load macros for editing,
+# (3) postprocess them, removing the padding
+# Changes the files in place, *no backups*.
+
+use strict;
+use Carp;
+use File::Path;
+use File::Basename;
+
+my @filenames = @ARGV;
+
+die "usage: $0 file1 file2 ..." if 0 == scalar @filenames;
+
+### PREPROCESSING
+# slurp all files
+my $data = undef;
+my $expected_linecount = undef;
+foreach my $fn (@filenames) {
+  my $text = load_file($fn);
+  my @lines = split /\n/, $text;
+  $data->{$fn} = [@lines];
+  my $linecount = scalar @lines;
+  if (defined $expected_linecount) {
+    print STDERR "WARNING: $fn: Got $linecount, expected $expected_linecount lines.\n"
+      if $linecount != $expected_linecount;
+    $expected_linecount = $linecount if $linecount > $expected_linecount;
+      # collect the highest number of lines
+  } else {
+    $expected_linecount = $linecount;
+  }
+}
+
+for (my $i=0; $i<$expected_linecount; $i++) {
+  # get max line length
+  my $needlen = undef;
+  foreach my $fn (@filenames) {
+    my $s = $data->{$fn}->[$i];
+    next if !defined $s; # this file is probably shorter
+    $data->{$fn}->[$i] = trim($s);
+    my $len = length($s);
+    $needlen = $len if !defined $needlen || $needlen < $len;
+  }
+  # pad everything to $needlen
+  foreach my $fn (@filenames) {
+    my $s = $data->{$fn}->[$i];
+    next if !defined $s; # this file is probably shorter
+    my $len = length($s);
+    my $pad = (" " x ($needlen - $len));
+    $data->{$fn}->[$i] = $s.$pad;
+  }
+}
+
+foreach my $fn (@filenames) {
+  my $txt = join("\n", @{$data->{$fn}});
+  $txt .= "\n";
+  save_file($fn, $txt);
+}
+
+
+#### RUN vim
+use File::Basename;
+use File::Spec;
+my $dirname = dirname(File::Spec->rel2abs( __FILE__ ));
+my $vimrcpath = $dirname."/"."manual-alignment.vimrc";
+die "Can't locate $vimrcpath" if ! -e $vimrcpath;
+
+my $maycallThird = scalar(@filenames) > 2 ? "-c 'call Third()'" : "";
+$maycallThird .= " -c 'call Fourth()'" if scalar(@filenames) > 3;
+
+my $vimcmd = "vim -c 'so $vimrcpath' $maycallThird @filenames";
+print STDERR "Running: $vimcmd\n";
+
+system($vimcmd);
+
+#### POSTPROCESS
+foreach my $fn (@filenames) {
+  my $text = load_file($fn);
+  my @lines = map {trim($_)} split /\n/, $text;
+  my $txt = join("\n", @lines);
+  $txt .= "\n";
+  save_file($fn, $txt);
+}
+
+
+sub trim {
+  my $s = shift;
+  $s =~ s/^  *//;
+  $s =~ s/  *$//;
+  return $s;
+}
+
+sub my_open {
+  my $f = shift;
+  if ($f eq "-") {
+    binmode(STDIN, ":utf8");
+    return *STDIN;
+  }
+  confess "Not found: $f" if ! -e $f;
+  my $escf = $f;
+  $escf =~ s/'/'"'"'/g;
+  $escf = "'$escf'";
+  my $opn;
+  my $hdl;
+  my $ft = `file '$escf'`;
+  # file might not recognize some files!
+  if ($f =~ /\.gz$/ || $ft =~ /gzip compressed data/) {
+    $opn = "zcat '$escf' |";
+  } elsif ($f =~ /\.bz2$/ || $ft =~ /bzip2 compressed data/) {
+    $opn = "bzcat '$escf' |";
+  } else {
+    $opn = "$f";
+  }
+  open $hdl, $opn or confess "Can't open '$opn': $!";
+  binmode $hdl, ":utf8";
+  return $hdl;
+}
+
+sub my_save {
+  my $f = shift;
+  if ($f eq "-") {
+    binmode(STDOUT, ":utf8");
+    return *STDOUT;
+  }
+  my $opn;
+  my $hdl;
+  # file might not recognize some files!
+  if ($f =~ /\.gz$/) {
+    $opn = "| gzip -c > '$f'";
+  } elsif ($f =~ /\.bz2$/) {
+    $opn = "| bzip2 > '$f'";
+  } else {
+    $opn = ">$f";
+  }
+  mkpath( dirname($f) );
+  open $hdl, $opn or confess "Can't write to '$opn': $!";
+  binmode $hdl, ":utf8";
+  return $hdl;
+}
+
+sub load_file {
+  my $fn = shift;
+  my $out = "";
+  my $h = my_open($fn);
+  $out .= $_ while <$h>;
+  close $h if $fn ne "-";
+  return $out;
+}
+
+sub save_file {
+  my $fn = shift;
+  my $text = shift;
+  my $h = my_save($fn);
+  print $h $text;
+  close $h;
+}
